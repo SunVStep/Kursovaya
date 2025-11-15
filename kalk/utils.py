@@ -1,6 +1,3 @@
-import math
-from .constants import nominal_voltages
-
 def round_up_to_nominal(value, znach):
     """Возвращает ближайшее номинальное значение из списка (znach)."""
     for index, v in enumerate(znach):

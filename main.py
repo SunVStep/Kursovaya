@@ -1,4 +1,3 @@
-# main.py
 from kalk.calculations import compute_for_variant
 from kalk.docx_tools import render_docx_with_images, replace_variables_in_docx
 from kalk.constants import TEMPLATE, TMP_DOCX, FINAL_DOCX
