@@ -1,5 +1,0 @@
-docxtpl
-python-docx
-matplotlib
-lxml
-numpy
