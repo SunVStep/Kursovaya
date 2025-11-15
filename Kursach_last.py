@@ -291,10 +291,11 @@ def get_variant_data(num: int):
     """Возвращает словарь параметров по номеру варианта"""
     variant = variants.get(num)
     if variant is None:
-        raise ValueError(f"Вариант №{num} не найден (доступны 1–29).")
+        available = f"1–{max(variants.keys())}"
+        raise ValueError(f"Вариант №{num} не найден (доступны {available}).")
     return variant
 
-num_variant = 22
+num_variant = 19
 
 num_of_variant = get_variant_data(num_variant)
 
@@ -381,7 +382,7 @@ N_max = round((P_k_max * (R_t_kc + R_t_pk)) / ((K_z_new * T_p_dop) - T_s_v), 2)
 N_min = round((P_k_max * (R_t_pk + (R_t_kc * R_t_kt) / (R_t_kc + R_t_kt))) / ((K_z_new * T_p_dop) - T_s_v), 2)
 
 N_max_okrugl = math.ceil(N_max)
-N_min_okrugl = math.floor(N_min)
+N_min_okrugl = math.ceil(N_min)
 
 R_tc_dop = abs(round(((K_z_new * T_p_dop - T_s_v) * (1 + R_t_kt/R_t_kc) - P_k_max * (R_t_pk + R_t_kt + (R_t_pk * R_t_kt / R_t_kc))) /
                      (P_k_max * (1 + R_t_pk/R_t_kc) - (K_z_new * T_p_dop - T_s_v) / R_t_kc), 2))
@@ -399,23 +400,37 @@ QTN_numbers = [
     for N in range(2, 32)
 ]
 
-# --- Найти точки пересечения двух линий ---
+# --- Найти точки пересечения двух линий (безопасно) ---
 x = np.arange(30)
 y1 = np.array(QG_numbers)
 y2 = np.array(QTN_numbers)
 
-# Список пересечений
 intersections = []
 
-indices = np.where(np.diff(np.sign(y1 - y2)))[0]
+# ищем индексы где функция меняет знак разницы
+indices = np.where(np.diff(np.sign(y1 - y2)) != 0)[0]
 for i in indices:
     x0, x1 = x[i], x[i+1]
     y10, y11 = y1[i], y1[i+1]
     y20, y21 = y2[i], y2[i+1]
-    t = (y20 - y10) / ((y11 - y10) - (y21 - y20))
-    x_cross = round(x0 + t * (x1 - x0), 2)
-    y_cross = y10 + t * (y11 - y10)
+    denom = ((y11 - y10) - (y21 - y20))
+    if abs(denom) < 1e-12:
+        continue
+    t = (y20 - y10) / denom
+    x_cross = round(float(x0 + t * (x1 - x0)), 4)
+    y_cross = float(y10 + t * (y11 - y10))
     intersections.append((x_cross, y_cross))
+
+# Безопасные значения по умолчанию, если пересечений нет
+if len(intersections) == 0:
+    print("Внимание: пересечений не найдено. Применяются запасные значения.")
+    # запасные значения — можно настроить по вашему желанию
+    x_cross = None
+    y_cross = None
+else:
+    # используем первый пересечный как "основной" по умолчанию
+    x_cross, y_cross = intersections[0]
+
 
 # --- Генерация графика с точками пересечения ---
 plt.figure(figsize=(15, 7))
