@@ -12,7 +12,16 @@ def get_variant_data(num: int):
         raise ValueError(f"Вариант №{num} не найден (доступны {available}).")
     return variant
 
-def compute_for_variant(num_variant:int):
+def compute_for_variant(
+    num_variant: int,
+    manual_N_opt: int = None,
+    manual_H: float = None,
+    manual_D: float = None,
+    manual_g: float = None,
+    manual_H2: float = None,
+    manual_D2: float = None,
+    transistor_params_override: dict = None
+):
     """
     Вся логика расчётов перенесена сюда. Возвращает словарь:
     { 'context': {...}, 'xml_replacements': {...}, 'img1': Path, 'img2': Path }
@@ -33,48 +42,53 @@ def compute_for_variant(num_variant:int):
     emmitor_kollektor = num_of_variant['transistors']
     L_nagr = num_of_variant['L_nagr']
 
+    params = transistor_params_override if transistor_params_override is not None else {}
+
+    # стационарные дополнительные параметры (копируются из вашего кода)
+    trans_1 = 'КТ831В'
+    trans_2 = 'КТ831В'
+    # Применяем safe_float для всех значений из GUI
+    U_ke_dop = safe_float(params.get('U_ke_dop', 80))
+    U_ke_nas = safe_float(params.get('U_ke_nas', 2))
+    I_k = safe_float(params.get('I_k', 2))
+    I_b = safe_float(params.get('I_b', 0.8))
+    U_be_dop = safe_float(params.get('U_be_dop', 5))
+    U_be_nas = safe_float(params.get('U_be_nas', 4))
+    I_k_dop = safe_float(params.get('I_k_dop', 4))
+    I_b_dop = safe_float(params.get('I_b_dop', 0.1))
+    I_kb_0 = safe_float(params.get('I_kb_0', 1))
+    I_e_0 = safe_float(params.get('I_e_0', 2))
+    P_k_max = safe_float(params.get('P_k_max', 20))
+    beta_min = safe_float(params.get('beta_min', 750))
+    beta_max = safe_float(params.get('beta_max', 0))  # beta_max не используется в расчетах, судя по коду
+    R_t_pk = safe_float(params.get('R_t_pk', 1.5))
+    R_t_kc = safe_float(params.get('R_t_kc', 70))
+    T_p_dop = safe_float(params.get('T_p_dop', 150))
+    f_gr = safe_float(params.get('f_gr', 25000))
+    Q_1 = safe_float(params.get('Q_1', 0.8658))
+    m = safe_float(params.get('m', 1))
+    K_t = safe_float(params.get('K_t', 0.0015))
+    R_t_kt = safe_float(params.get('R_t_kt', 0.15))
+    T_s_v = safe_float(params.get('T_s_v', 60))
+
+    K_z = 1.2
+    K_z_new = 0.875
+
     U_n = round(I_n * R_n, 2)
     if L_nagr == "Отсутствует":
         U_L_max = 0
     else:
         U_L_max = round(0.5 * I_n * float(L_nagr) * 100)
 
-    U_n_max = round(I_n * R_n , 2)
+    U_n_max = round(I_n * R_n, 2)
     U_ip_first = round((U_n_max + U_L_max) / 0.94, 2)
     U_ip_second = round((U_n_max + U_L_max) / 0.9, 2)
 
-    U_ip_okrugl = round_up_to_nominal((U_ip_first + U_ip_second)/2, nominal_voltages)
+    U_ip_okrugl = round_up_to_nominal((U_ip_first + U_ip_second) / 2, nominal_voltages)
     K_z = 1.2
     U_ke_max = round(2 * K_z * U_ip_okrugl, 1)
     I_k_max = round(K_z * I_n, 1)
-    P_k_max_start = round(0.3 * I_n**2 * R_n, 3)
-
-    # стационарные дополнительные параметры (копируются из вашего кода)
-    trans_1 = 'КТ831В'
-    trans_2 = 'КТ831В'
-    U_ke_dop = 80
-    U_ke_nas = 2
-    I_k = 2
-    I_b = 0.8
-    U_be_dop = 5
-    U_be_nas = 4
-    I_k_dop = 4
-    I_b_dop = 0.1
-    I_kb_0 = 1
-    I_e_0 = 2
-    P_k_max = 20
-    beta_min = 750
-    beta_max = 0
-    R_t_pk = 1.5
-    R_t_kc = 70
-    T_p_dop = 150
-    f_gr = 25000
-    Q_1 = 0.8658
-    m = 1
-    K_t = 0.0015
-    R_t_kt = 0.15
-    T_s_v = 60
-    K_z_new = 0.875
+    P_k_max_start = round(0.3 * I_n ** 2 * R_n, 3)
 
     N_max = round((P_k_max * (R_t_kc + R_t_pk)) / ((K_z_new * T_p_dop) - T_s_v), 2)
     N_min = round((P_k_max * (R_t_pk + (R_t_kc * R_t_kt) / (R_t_kc + R_t_kt))) / ((K_z_new * T_p_dop) - T_s_v), 2)
@@ -183,6 +197,7 @@ def compute_for_variant(num_variant:int):
 
     # --- дальнейшие расчёты (всё как у вас) ---
     F_p_new = abs(round((K_z_new*T_p_dop - T_s_v)/P_k_max_new - (R_t_kt + R_t_pk), 2))
+
     H_2 = 11.1; D_2 = 10.06
     r_ekv_cm_new = round(((1 * Q_1)/math.pi)**(1/2), 2)
     phi_new = round(2 * F_p_new * lambd_znach * d_2 * 0.001, 2)
@@ -209,6 +224,7 @@ def compute_for_variant(num_variant:int):
     h_rebr_new_mm = h_rebr_new * 0.1
     V_r = round(H * D * (h_rebr_mm + d_2_mm), 2)
     V_r_new = round(H_2 * D_2 * (h_rebr_new_mm + d_2_mm), 2)
+
     delta_T_p_dop = 5
     K_z_new_2 = 0.8
     lambda_i = 2
@@ -225,10 +241,13 @@ def compute_for_variant(num_variant:int):
 
     i_zakr = generate_increasing_steps_excluded(I_k_zakr_1, I_k_zakr_2)
     R_b = [round((( (m * phi_t) / (N_opt_konechnoe * I_kb_0 * 0.001) * math.log(((i / (N_opt_konechnoe * I_kb_0 * 0.001)) - 1) * (I_kb_0 * 0.001 / (I_e_0 * 0.001)) + 1) + ((i / (N_opt_konechnoe * I_kb_0 * 0.001)) - 1) * (R_e_ur_new / N_opt_konechnoe) ) / ( 1 - (i / (N_opt_konechnoe * I_kb_0 * 0.001 * (beta_max_new + 1))) ) ) - (R_vh_vt_min / N_opt_konechnoe),2) for i in i_zakr]
+    safe_R_b = [r if r > 0 else 1e-6 for r in R_b]
 
     KPD = [ round( 1 / ( (U_ip_okrugl / U_n) * ( (2 * i / I_n) + ( (U_be_nas / I_n) + (R_e_ur_new / N_opt_konechnoe) ) / b + 1 ) ), 3) for i, b in zip(i_zakr, R_b) ]
     max_of_KPD = max(KPD)
     ekstremum = R_b[KPD.index(max_of_KPD)]
+
+    plot_Rb_KPD(R_b, i_zakr, KPD, ekstremum, IMG_2)
 
     U_ke_max_dop = round(2 * K_z_new_2 * U_ip_okrugl, 2)
 
@@ -284,8 +303,6 @@ def compute_for_variant(num_variant:int):
     K_shtrih = (K_max + K_min) / 2
 
     pogr_K = round((K_max - K_min) / (K_max + K_min), 3)
-
-    plot_Rb_KPD(R_b, i_zakr, KPD, ekstremum, IMG_2)
 
     # вычисления для context и xml_replacements (сохраняем в словари)
     context = {
@@ -484,8 +501,8 @@ def compute_for_variant(num_variant:int):
         'Ie0': I_e_0,
         'Ikzakrfir': I_k_zakr_1,
         'Ikzakrsec': I_k_zakr_2,
-        'Ikzakr': i_zakr[0],
-        'Rb': R_b[0],
+        'Ikzakr': i_zakr[0] if len(i_zakr) > 0 else 0,
+        'Rb': R_b[0] if len(R_b) > 0 else 0,
         'ekstremum': ekstremum,
         'Uip': U_ip_okrugl,
         'Ukemaxdop': U_ke_max_dop,
