@@ -1,15 +1,20 @@
+# gui.py
+# Обновлённый GUI: вычисленные значения слева на странице транзистора,
+# кнопка "Сохранить" под таблицей, "Дальше" справа переводит на страницу с графиком.
+
 import sys
+import json
 from pathlib import Path
-from PyQt6 import QtWidgets, QtCore
+from PyQt6 import QtWidgets, QtCore, QtGui
 from PyQt6.QtCore import Qt
-from kalk.constants import variants
 
-# ---------- Вспомогательные ----------
-def default_output_path(filename="Итоговый_курсач.docx"):
-    desktop = Path.home() / "Desktop"
-    return str((desktop / filename).resolve())
+SETTINGS_PATH = Path.home() / ".kursach_settings.json"
 
-# Список параметров транзистора и их default-значений (как ты прислал)
+try:
+    from kalk.calculations import compute_for_variant
+except Exception:
+    compute_for_variant = None
+
 TRANSISTOR_PARAMS = [
     ("U_ke_dop", "80"),
     ("U_ke_nas", "2"),
@@ -35,96 +40,60 @@ TRANSISTOR_PARAMS = [
     ("T_s_v", "60"),
 ]
 
-# ---------- Диалог выбора варианта (увеличенный, одна кнопка "Сохранить") ----------
-class VariantDialog(QtWidgets.QDialog):
-    choose_variant = QtCore.pyqtSignal(int)
+def default_output_path(filename="Итоговый_курсач.docx"):
+    desktop = Path.home() / "Desktop"
+    return str((desktop / filename).resolve())
 
-    def __init__(self, parent=None, current_variant=1, min_var=1, max_var=29):
-        super().__init__(parent)
-        self.setWindowTitle("Выбор варианта")
-        self.setModal(True)
-        # увеличим размер
-        self.resize(420, 200)
-        self._build_ui(current_variant, min_var, max_var)
-        if parent is not None:
-            # центрируем
-            parent_center = parent.geometry().center()
-            self.move(parent_center - self.rect().center())
+def load_settings():
+    if SETTINGS_PATH.exists():
+        try:
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
 
-    def _build_ui(self, current_variant, min_var, max_var):
-        vbox = QtWidgets.QVBoxLayout(self)
+def save_settings(data: dict):
+    try:
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
 
-        lbl = QtWidgets.QLabel("<h3>Выберите номер варианта</h3>")
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        vbox.addWidget(lbl)
-
-        spin_layout = QtWidgets.QHBoxLayout()
-        spin_layout.addStretch(1)
-        self.spin = QtWidgets.QSpinBox()
-        self.spin.setRange(min_var, max_var)
-        self.spin.setValue(current_variant)
-        self.spin.setFixedWidth(120)
-        spin_layout.addWidget(self.spin)
-        spin_layout.addStretch(1)
-        vbox.addLayout(spin_layout)
-
-        vbox.addSpacing(10)
-        info = QtWidgets.QLabel("Нажмите «Сохранить», чтобы применить выбранный вариант.")
-        info.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        vbox.addWidget(info)
-
-        # Кнопка "Сохранить" под полем выбора
-        btn_save = QtWidgets.QPushButton("Сохранить")
-        btn_save.setFixedSize(140, 36)
-        btn_save.clicked.connect(self._on_save)
-        vbox.addWidget(btn_save, alignment=Qt.AlignmentFlag.AlignCenter)
-
-    def _on_save(self):
-        val = int(self.spin.value())
-        self.choose_variant.emit(val)
-        self.accept()
-
-# ---------- Главное окно ----------
 class MainWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Генератор курсовой - Интерфейс")
-        self.resize(900, 560)
+        self.setWindowTitle("Генератор курсовой — GUI")
+        self.resize(1000, 640)
 
-        # состояние приложения
-        self.current_variant = 1
-        self.output_path = default_output_path()
-        self.trans_params = {k: v for k, v in TRANSISTOR_PARAMS}
+        settings = load_settings()
+        self.output_path = settings.get("output_path", default_output_path())
+        self.current_variant = settings.get("variant", 1)
+        self.trans_params = settings.get("trans_params", {k: v for k, v in TRANSISTOR_PARAMS})
+        self.N_opt = settings.get("N_opt", None)
+        self.computed = {"U_ke_max": None, "I_k_max": None, "P_k_max_start": None}
+        self.img1_path = None
 
-        # UI
         self._build_ui()
 
     def _build_ui(self):
         main_v = QtWidgets.QVBoxLayout(self)
-
-        # Стек страниц
         self.stack = QtWidgets.QStackedWidget()
         main_v.addWidget(self.stack, stretch=8)
-
-        # Логи внизу
         self.log_box = QtWidgets.QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setFixedHeight(140)
         main_v.addWidget(self.log_box, stretch=2)
 
-        # страницы
         self._page_welcome()
-        self._page_path()
-        self._page_summary()
-        self._page_variant_values()
-        self._page_transistor_params()
+        self._page_path_variant()
+        self._page_transistor_params()   # now has computed labels on left
+        self._page_graph_n()
 
-        # стартовая страница
         self.stack.setCurrentIndex(0)
-        # начальное сообщение (логируем только старт)
         self._log("Окно открыто. Добро пожаловать!")
 
-    # ----------------- pages -----------------
     def _page_welcome(self):
         page = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(page)
@@ -132,262 +101,402 @@ class MainWindow(QtWidgets.QWidget):
         lbl = QtWidgets.QLabel("<h1>Добро пожаловать!</h1>")
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(lbl)
-        sub = QtWidgets.QLabel("Нажмите «Продолжить», чтобы начать.")
+        sub = QtWidgets.QLabel("Нажмите «Продолжить», чтобы перейти к настройкам.")
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(sub)
         lay.addStretch(1)
         btn = QtWidgets.QPushButton("Продолжить")
-        btn.setFixedSize(160, 44)
-        btn.clicked.connect(lambda: self.stack.setCurrentIndex(1))  # не логируем переход
+        btn.setFixedSize(180, 44)
+        btn.clicked.connect(lambda: self.stack.setCurrentIndex(1))
         lay.addWidget(btn, alignment=Qt.AlignmentFlag.AlignHCenter)
         lay.addStretch(2)
         self.stack.addWidget(page)
 
-    def _page_path(self):
+    def _page_path_variant(self):
         page = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(page)
-        title = QtWidgets.QLabel("<h2>Выберите место и имя итогового файла</h2>")
-        lay.addWidget(title)
+        vlay = QtWidgets.QVBoxLayout(page)
 
-        form = QtWidgets.QHBoxLayout()
-        self.path_edit = QtWidgets.QLineEdit()
-        self.path_edit.setText(self.output_path)
-        self.path_edit.setMinimumWidth(500)
+        top_h = QtWidgets.QHBoxLayout()
+        path_edit = QtWidgets.QLineEdit()
+        path_edit.setText(self.output_path)
+        path_edit.setMinimumWidth(520)
         btn_browse = QtWidgets.QPushButton("Обзор...")
-        btn_browse.clicked.connect(self._on_browse)
-        form.addWidget(self.path_edit)
-        form.addWidget(btn_browse)
-        lay.addLayout(form)
+        btn_browse.clicked.connect(lambda: self._browse_and_set_path(path_edit))
+        top_h.addWidget(QtWidgets.QLabel("<b>Путь для итогового файла:</b>"))
+        top_h.addWidget(path_edit)
+        top_h.addWidget(btn_browse)
+        vlay.addLayout(top_h)
 
-        nav = QtWidgets.QHBoxLayout()
-        self.btn_back_from_path = QtWidgets.QPushButton("← Назад")
-        self.btn_back_from_path.setEnabled(False)
-        self.btn_next_from_path = QtWidgets.QPushButton("Дальше →")
-        self.btn_next_from_path.clicked.connect(self._on_path_next)
-        nav.addWidget(self.btn_back_from_path)
-        nav.addStretch(1)
-        nav.addWidget(self.btn_next_from_path)
-        lay.addLayout(nav)
+        var_h = QtWidgets.QHBoxLayout()
+        var_h.addStretch(1)
+        self.spin_variant = QtWidgets.QSpinBox()
+        self.spin_variant.setRange(1, 999)
+        self.spin_variant.setValue(int(self.current_variant))
+        self.spin_variant.setFixedWidth(100)
+        var_box = QtWidgets.QVBoxLayout()
+        var_box.addWidget(QtWidgets.QLabel("<b>Номер варианта</b>"), alignment=Qt.AlignmentFlag.AlignHCenter)
+        var_box.addWidget(self.spin_variant, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self.btn_save_variant = QtWidgets.QPushButton("Сохранить вариант")
+        self.btn_save_variant.setFixedWidth(140)
+        self.btn_save_variant.clicked.connect(lambda: self._save_variant(path_edit.text().strip()))
+        var_box.addWidget(self.btn_save_variant, alignment=Qt.AlignmentFlag.AlignHCenter)
+        var_h.addLayout(var_box)
+        var_h.addStretch(1)
+        vlay.addLayout(var_h)
 
-        self.stack.addWidget(page)
+        # center area: just variables table (no computed left here anymore)
+        center_widget = QtWidgets.QWidget()
+        center_layout = QtWidgets.QHBoxLayout(center_widget)
+        center_layout.addStretch(1)
+        vars_group = QtWidgets.QGroupBox("Параметры варианта (предпросмотр)")
+        vars_group.setMinimumWidth(600)
+        form = QtWidgets.QFormLayout()
+        self.variant_widgets = {}
+        for name in ("R_n","I_n","R_c_1","R_c_2","R_c_3","K_u_1","K_u_2","K_u_3",
+                     "R_vh_1","R_vh_2","R_vh_3","transistors","L_nagr"):
+            w = QtWidgets.QLabel("-")
+            w.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            form.addRow(QtWidgets.QLabel(name), w)
+            self.variant_widgets[name] = w
+        vars_group.setLayout(form)
+        center_layout.addWidget(vars_group)
+        center_layout.addStretch(1)
+        vlay.addWidget(center_widget)
 
-    def _page_summary(self):
-        page = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(page)
-        title = QtWidgets.QLabel("<h2>Выбор варианта</h2>")
-        lay.addWidget(title)
-
-        info = QtWidgets.QLabel("Нажмите кнопку 'Выбрать вариант' чтобы открыть диалог.")
-        lay.addWidget(info)
-
-        btn_choose = QtWidgets.QPushButton("Выбрать вариант")
-        btn_choose.clicked.connect(self._open_variant_dialog)
-        lay.addWidget(btn_choose, alignment=Qt.AlignmentFlag.AlignCenter)
-
-        # Навигация: Назад (в путь) и Дальше (в экран со значениями варианта)
-        nav = QtWidgets.QHBoxLayout()
+        bottom_nav = QtWidgets.QHBoxLayout()
         btn_back = QtWidgets.QPushButton("← Назад")
-        btn_back.clicked.connect(lambda: self.stack.setCurrentIndex(1))  # назад — не логируем
+        btn_back.clicked.connect(lambda: self.stack.setCurrentIndex(0))
         btn_next = QtWidgets.QPushButton("Дальше →")
-        btn_next.clicked.connect(self._on_summary_next)  # показывает переменные варианта
-        nav.addWidget(btn_back)
-        nav.addStretch(1)
-        nav.addWidget(btn_next)
-        lay.addLayout(nav)
+        btn_next.clicked.connect(self._on_path_variant_next)
+        bottom_nav.addWidget(btn_back)
+        bottom_nav.addStretch(1)
+        bottom_nav.addWidget(btn_next)
+        vlay.addLayout(bottom_nav)
 
-        # Индикация выбранного варианта и пути
-        self.label_selected = QtWidgets.QLabel(self._summary_text())
-        lay.addWidget(self.label_selected)
+        self.path_edit = path_edit
         self.stack.addWidget(page)
-
-    def _page_variant_values(self):
-        page = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(page)
-        title = QtWidgets.QLabel("<h2>Параметры выбранного варианта</h2>")
-        lay.addWidget(title)
-
-        # Используем QLabel с HTML, чтобы красиво отобразить набор переменных
-        self.vars_label = QtWidgets.QLabel()
-        self.vars_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.vars_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self.vars_label.setMinimumHeight(300)
-        self.vars_label.setWordWrap(True)
-        lay.addWidget(self.vars_label)
-
-        nav = QtWidgets.QHBoxLayout()
-        btn_back = QtWidgets.QPushButton("← Назад")
-        btn_back.clicked.connect(lambda: self.stack.setCurrentIndex(2))  # возвращаемся к summary
-        btn_next = QtWidgets.QPushButton("Дальше →")
-        btn_next.clicked.connect(lambda: self.stack.setCurrentIndex(4))  # переходим к странице транзистора
-        nav.addWidget(btn_back)
-        nav.addStretch(1)
-        nav.addWidget(btn_next)
-        lay.addLayout(nav)
-
-        self.stack.addWidget(page)
+        self._update_variant_widgets_from_settings()
 
     def _page_transistor_params(self):
         page = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(page)
-        title = QtWidgets.QLabel("<h2>Параметры транзистора (ввод/правка)</h2>")
-        lay.addWidget(title)
+        vlay = QtWidgets.QVBoxLayout(page)
+        title = QtWidgets.QLabel("<h2>Параметры транзистора (редактируемые)</h2>")
+        vlay.addWidget(title, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        # Форма параметров — QFormLayout; по умолчанию значения из TRANSISTOR_PARAMS
-        self.form_widget = QtWidgets.QWidget()
-        form_layout = QtWidgets.QFormLayout(self.form_widget)
-        self.param_editors = {}  # имя -> widget (QLineEdit или QLabel после сохранения)
+        # Main horizontal: left computed values, center form
+        main_h = QtWidgets.QHBoxLayout()
+        # Left computed
+        left_group = QtWidgets.QGroupBox("Вычисленные (из calculations)")
+        left_layout = QtWidgets.QVBoxLayout(left_group)
+        self.lbl_Uke = QtWidgets.QLabel("U_ke_max >= -")
+        self.lbl_Ik = QtWidgets.QLabel("I_k_max >= -")
+        self.lbl_Pk = QtWidgets.QLabel("P_k_max_start >= -")
+        left_layout.addWidget(self.lbl_Uke)
+        left_layout.addWidget(self.lbl_Ik)
+        left_layout.addWidget(self.lbl_Pk)
+        left_layout.addStretch(1)
+        left_group.setFixedWidth(260)
+        main_h.addWidget(left_group, alignment=Qt.AlignmentFlag.AlignLeft)
 
+        # Center form (grouped and centered)
+        center_widget = QtWidgets.QWidget()
+        center_layout = QtWidgets.QVBoxLayout(center_widget)
+        form_group = QtWidgets.QGroupBox("Значения параметров транзистора")
+        form_layout = QtWidgets.QFormLayout()
+        self.param_editors = {}
         for name, default in TRANSISTOR_PARAMS:
             le = QtWidgets.QLineEdit()
-            le.setText(str(default))
+            le.setText(str(self.trans_params.get(name, default)))
             form_layout.addRow(QtWidgets.QLabel(name), le)
             self.param_editors[name] = le
+        form_group.setLayout(form_layout)
+        center_layout.addWidget(form_group)
+        center_layout.addStretch(1)
+        main_h.addWidget(center_widget, stretch=1)
 
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self.form_widget)
-        lay.addWidget(scroll)
+        vlay.addLayout(main_h)
 
-        # Кнопка "Сохранить" для подтверждения параметров транзистора
+        # Save button should be directly under the form (centered)
+        save_row = QtWidgets.QHBoxLayout()
+        save_row.addStretch(1)
         btn_save = QtWidgets.QPushButton("Сохранить")
-        btn_save.clicked.connect(self._on_save_trans_params)
-        # Навигация: назад и пустое место
-        nav = QtWidgets.QHBoxLayout()
+        btn_save.setFixedWidth(140)
+        btn_save.clicked.connect(self._on_save_transistor_params)
+        save_row.addWidget(btn_save)
+        save_row.addStretch(1)
+        vlay.addLayout(save_row)
+
+        # Bottom navigation: Back (left) and Next (right)
+        bottom_nav = QtWidgets.QHBoxLayout()
         btn_back = QtWidgets.QPushButton("← Назад")
-        btn_back.clicked.connect(lambda: self.stack.setCurrentIndex(3))  # назад к vars
-        nav.addWidget(btn_back)
-        nav.addStretch(1)
-        nav.addWidget(btn_save)
-        lay.addLayout(nav)
+        btn_back.clicked.connect(lambda: self.stack.setCurrentIndex(1))
+        btn_next = QtWidgets.QPushButton("Дальше →")
+        btn_next.clicked.connect(lambda: self.stack.setCurrentIndex(3))  # go to graph page index 3
+        bottom_nav.addWidget(btn_back)
+        bottom_nav.addStretch(1)
+        bottom_nav.addWidget(btn_next)
+        vlay.addLayout(bottom_nav)
 
         self.stack.addWidget(page)
 
-    # ----------------- вспомогательные методы -----------------
-    def _summary_text(self):
-        return f"<b>Путь:</b> {self.output_path} <br> <b>Выбран вариант:</b> {self.current_variant}"
+    def _page_graph_n(self):
+        page = QtWidgets.QWidget()
+        vlay = QtWidgets.QVBoxLayout(page)
+        title = QtWidgets.QLabel("<h2>График Q vs N</h2>")
+        vlay.addWidget(title, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self.graph_label = QtWidgets.QLabel()
+        self.graph_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.graph_label.setFixedSize(800, 360)
+        vlay.addWidget(self.graph_label)
+        vlay.addSpacing(6)
+        prompt = QtWidgets.QLabel("Глядя на график, вы должны найти оптимальное количество транзисторов N:")
+        prompt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vlay.addWidget(prompt)
+        n_h = QtWidgets.QHBoxLayout()
+        n_h.addStretch(1)
+        self.spin_N = QtWidgets.QSpinBox()
+        self.spin_N.setRange(1, 999)
+        if self.N_opt:
+            try:
+                self.spin_N.setValue(int(self.N_opt))
+            except Exception:
+                pass
+        self.spin_N.setFixedWidth(120)
+        n_h.addWidget(self.spin_N)
+        n_h.addStretch(1)
+        vlay.addLayout(n_h)
+        btn_save_n = QtWidgets.QPushButton("Сохранить N")
+        btn_save_n.clicked.connect(self._on_save_N)
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_row.addWidget(btn_save_n)
+        btn_row.addStretch(1)
+        vlay.addLayout(btn_row)
+        nav = QtWidgets.QHBoxLayout()
+        btn_back = QtWidgets.QPushButton("← Назад")
+        btn_back.clicked.connect(lambda: self.stack.setCurrentIndex(2))
+        btn_finish = QtWidgets.QPushButton("Готово")
+        btn_finish.clicked.connect(self._on_finish_all)
+        nav.addWidget(btn_back)
+        nav.addStretch(1)
+        nav.addWidget(btn_finish)
+        vlay.addLayout(nav)
+        self.stack.addWidget(page)
+
+    # ---------- actions ----------
+    def _browse_and_set_path(self, path_edit_widget):
+        start = path_edit_widget.text() or default_output_path()
+        fname, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Сохранить как", start,
+                                                         "Документ Word (*.docx);;Все файлы (*)")
+        if fname:
+            if not fname.lower().endswith(".docx"):
+                fname = fname + ".docx"
+            path_edit_widget.setText(fname)
+            self.output_path = fname
+            self._log(f"Путь сохранен: {self.output_path}")
+            self._persist_settings()
+
+    def _save_variant(self, path_text):
+        self.output_path = path_text or self.output_path
+        self.current_variant = int(self.spin_variant.value())
+        self._persist_settings()
+        self._log(f"Вариант сохранён: {self.current_variant}")
+        self._update_computed_and_vars()
+
+    def _update_variant_widgets_from_settings(self):
+        if compute_for_variant is None:
+            self.spin_variant.setRange(1, 29)
+        else:
+            try:
+                import kalk.constants as kc
+                mx = max(kc.variants.keys())
+                self.spin_variant.setRange(1, mx)
+            except Exception:
+                self.spin_variant.setRange(1, 99)
+        self.spin_variant.setValue(int(self.current_variant))
+        self._update_computed_and_vars()
+
+    def _update_computed_and_vars(self):
+        """
+        Обновляем вычисленные параметры (U_ke_max, I_k_max, P_k_max_start) и
+        наполняем виджеты, если они уже созданы.
+
+        Функция безопасна: проверяет наличие QLabel-виджетов (lbl_Uke/lbl_Ik/lbl_Pk)
+        перед тем, как с ними работать — это предотвращает ошибки при инициализации.
+        """
+        # Локально подготовим данные, затем попытаемся обновить UI-виджеты, если они есть.
+        data = {}
+        U = None
+        I = None
+        P = None
+
+        if compute_for_variant is None:
+            # fallback: никаких вычислений, заполняем дефолтами
+            U = None
+            I = None
+            P = None
+            try:
+                import kalk.constants as kc
+                data = kc.variants.get(self.current_variant, {})
+            except Exception:
+                data = {}
+        else:
+            # Попытка выполнить вычисления
+            try:
+                result = compute_for_variant(self.current_variant)
+                ctx = result.get('context', {}) if isinstance(result, dict) else {}
+                # Поищем значения в нескольких местах результата
+                U = ctx.get('U_ke_max') or (
+                    result.get('xml_replacements', {}).get('Ukedop') if isinstance(result, dict) else None)
+                I = ctx.get('I_k_max') or (
+                    result.get('xml_replacements', {}).get('Ikdop') if isinstance(result, dict) else None)
+                P = ctx.get('P_k_max_start') or (
+                    result.get('xml_replacements', {}).get('Pkdop') if isinstance(result, dict) else None)
+                self.computed['U_ke_max'] = U
+                self.computed['I_k_max'] = I
+                self.computed['P_k_max_start'] = P
+                self.img1_path = result.get('img1') if isinstance(result, dict) else getattr(result, 'img1', None)
+                # try to fetch variant dictionary too
+                try:
+                    import kalk.constants as kc
+                    data = kc.variants.get(self.current_variant, {})
+                except Exception:
+                    data = {}
+            except Exception as e:
+                # если вычисления упали — логируем и продолжаем с пустыми данными
+                self._log(f"Ошибка расчёта: {e}")
+                U = None;
+                I = None;
+                P = None
+                data = {}
+
+        # Если UI-метки для computed уже существуют — обновим их
+        if hasattr(self, 'lbl_Uke'):
+            self.lbl_Uke.setText(f"U_ke_max >= {U}" if U is not None else "U_ke_max >= -")
+        if hasattr(self, 'lbl_Ik'):
+            self.lbl_Ik.setText(f"I_k_max >= {I}" if I is not None else "I_k_max >= -")
+        if hasattr(self, 'lbl_Pk'):
+            self.lbl_Pk.setText(f"P_k_max_start >= {P}" if P is not None else "P_k_max_start >= -")
+
+        # Обновляем центр таблицы с параметрами варианта, если виджеты созданы
+        def set_lbl(name, val):
+            if hasattr(self, 'variant_widgets') and name in self.variant_widgets:
+                w = self.variant_widgets.get(name)
+                if w is not None:
+                    w.setText(str(val) if val is not None else "-")
+
+        R_n = data.get('R_n', '-') if isinstance(data, dict) else '-'
+        I_n = data.get('I_n', '-') if isinstance(data, dict) else '-'
+        Rc = data.get('R_c', ['-', '-', '-']) if isinstance(data, dict) else ['-', '-', '-']
+        Ku = data.get('K_u', ['-', '-', '-']) if isinstance(data, dict) else ['-', '-', '-']
+        Rvh = data.get('R_vh', ['-', '-', '-']) if isinstance(data, dict) else ['-', '-', '-']
+        trans = data.get('transistors', '-') if isinstance(data, dict) else '-'
+        L_nagr = data.get('L_nagr', '-') if isinstance(data, dict) else '-'
+
+        set_lbl('R_n', R_n)
+        set_lbl('I_n', I_n)
+        set_lbl('R_c_1', Rc[0] if len(Rc) > 0 else '-')
+        set_lbl('R_c_2', Rc[1] if len(Rc) > 1 else '-')
+        set_lbl('R_c_3', Rc[2] if len(Rc) > 2 else '-')
+        set_lbl('K_u_1', Ku[0] if len(Ku) > 0 else '-')
+        set_lbl('K_u_2', Ku[1] if len(Ku) > 1 else '-')
+        set_lbl('K_u_3', Ku[2] if len(Ku) > 2 else '-')
+        set_lbl('R_vh_1', Rvh[0] if len(Rvh) > 0 else '-')
+        set_lbl('R_vh_2', Rvh[1] if len(Rvh) > 1 else '-')
+        set_lbl('R_vh_3', Rvh[2] if len(Rvh) > 2 else '-')
+        set_lbl('transistors', trans)
+        set_lbl('L_nagr', L_nagr)
+
+    def _on_path_variant_next(self):
+        self._update_computed_and_vars()
+        self.stack.setCurrentIndex(2)
+
+    def _on_save_transistor_params(self):
+        for name, editor in self.param_editors.items():
+            if isinstance(editor, QtWidgets.QLineEdit):
+                self.trans_params[name] = editor.text().strip()
+        self._persist_settings()
+        QtWidgets.QMessageBox.information(self, "Сохранено", "Параметры транзистора сохранены.")
+        self._log("Данные для транзистора сохранены.")
+
+    def _on_save_N(self):
+        self.N_opt = int(self.spin_N.value())
+        self._persist_settings()
+        self._log(f"N сохранён: {self.N_opt}")
+        QtWidgets.QMessageBox.information(self, "Сохранено", f"N = {self.N_opt} сохранён в настройках.")
+
+    def _on_finish_all(self):
+        self._persist_settings()
+        QtWidgets.QMessageBox.information(self, "Готово", f"Настройки сохранены: {SETTINGS_PATH}")
+        self._log("Пользователь завершил работу (нажал Готово).")
+
+    def _persist_settings(self):
+        data = {
+            "output_path": self.output_path,
+            "variant": int(self.spin_variant.value()),
+            "trans_params": self.trans_params,
+            "N_opt": self.N_opt
+        }
+        ok = save_settings(data)
+        if not ok:
+            self._log("Ошибка: не удалось сохранить настройки в JSON.")
 
     def _log(self, text: str):
         import datetime
         now = datetime.datetime.now().strftime("%H:%M:%S")
         self.log_box.append(f"[{now}] {text}")
 
-    # -------------- действия ----------------
-    def _on_browse(self):
-        start = self.path_edit.text() or default_output_path()
-        fname, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Сохранить как", start,
-                                                         "Документ Word (*.docx);;Все файлы (*)")
-        if fname:
-            if not fname.lower().endswith(".docx"):
-                fname = fname + ".docx"
-            self.path_edit.setText(fname)
-            self.output_path = fname
-            # логируем подтверждение выбора пути
-            self._log(f"Путь сохранен: {self.output_path}")
-
-    def _on_path_next(self):
-        txt = self.path_edit.text().strip()
-        if not txt:
-            QtWidgets.QMessageBox.warning(self, "Внимание", "Пожалуйста, укажите путь для сохранения файла.")
+    def show_graph_page(self):
+        if compute_for_variant is None:
+            pix = QtGui.QPixmap(780, 340)
+            pix.fill(QtGui.QColor("lightgray"))
+            painter = QtGui.QPainter(pix)
+            painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "График недоступен (compute_for_variant не найден)")
+            painter.end()
+            self.graph_label.setPixmap(pix.scaled(self.graph_label.size(), Qt.AspectRatioMode.KeepAspectRatio))
             return
-        self.output_path = txt
-        self._log(f"Пользователь подтвердил путь: {self.output_path}")
-        # переходим к странице выбора варианта (summary)
-        self.stack.setCurrentIndex(2)
-
-    # ---------- Variant dialog ----------
-    def _open_variant_dialog(self):
-        dlg = VariantDialog(parent=self, current_variant=self.current_variant, min_var=1, max_var=max(variants.keys()))
-        dlg.choose_variant.connect(self._on_variant_saved)
-        dlg.exec()  # модальный; после accept() продолжим
-
-    def _on_variant_saved(self, variant_num: int):
-        self.current_variant = variant_num
-        # логируем только факт сохранения варианта
-        self._log(f"Вариант сохранён: {self.current_variant}")
-        self.label_selected.setText(self._summary_text())
-
-    # ---------- summary -> vars ----------
-    def _on_summary_next(self):
-        # При переходе на страницу с переменными обновляем содержимое vars_label
-        self._populate_variant_values()
-        self.stack.setCurrentIndex(3)
-
-    def _populate_variant_values(self):
-        # Берём данные из variants и красиво форматируем
-        num = self.current_variant
-        data = variants.get(num, {})
-        # собираем нужные поля (такие же, как в твоём коде)
         try:
-            R_n = data['R_n']
-            I_n = data['I_n']
-            R_c_1 = data['R_c'][0]
-            R_c_2 = data['R_c'][1]
-            R_c_3 = data['R_c'][2]
-            K_u_1 = data['K_u'][0]
-            K_u_2 = data['K_u'][1]
-            K_u_3 = data['K_u'][2]
-            R_vh_1 = data['R_vh'][0]
-            R_vh_2 = data['R_vh'][1]
-            R_vh_3 = data['R_vh'][2]
-            emmitor_kollektor = data.get('transistors', '')
-            L_nagr = data.get('L_nagr', '')
-        except Exception as e:
-            # если формат не такой — просто показать содержимое словаря
-            self.vars_label.setText("<pre>" + str(data) + "</pre>")
-            return
-
-        html = f"""
-        <h3>Вариант №{num}</h3>
-        <table cellpadding="4">
-          <tr><td><b>R_n</b></td><td>{R_n}</td></tr>
-          <tr><td><b>I_n</b></td><td>{I_n}</td></tr>
-          <tr><td><b>R_c_1</b></td><td>{R_c_1}</td></tr>
-          <tr><td><b>R_c_2</b></td><td>{R_c_2}</td></tr>
-          <tr><td><b>R_c_3</b></td><td>{R_c_3}</td></tr>
-          <tr><td><b>K_u_1</b></td><td>{K_u_1}</td></tr>
-          <tr><td><b>K_u_2</b></td><td>{K_u_2}</td></tr>
-          <tr><td><b>K_u_3</b></td><td>{K_u_3}</td></tr>
-          <tr><td><b>R_vh_1</b></td><td>{R_vh_1}</td></tr>
-          <tr><td><b>R_vh_2</b></td><td>{R_vh_2}</td></tr>
-          <tr><td><b>R_vh_3</b></td><td>{R_vh_3}</td></tr>
-          <tr><td><b>transistors</b></td><td>{emmitor_kollektor}</td></tr>
-          <tr><td><b>L_nagr</b></td><td>{L_nagr}</td></tr>
-        </table>
-        """
-        self.vars_label.setText(html)
-
-    # ---------- transistor params ----------
-    def _on_save_trans_params(self):
-        # Сохраняем значения из редакторов в self.trans_params и заменяем поля на labels (readonly)
-        saved_pairs = []
-        for name, widget in list(self.param_editors.items()):
-            if isinstance(widget, QtWidgets.QLineEdit):
-                val = widget.text().strip()
-                # заменяем на QLabel с plain text
-                label = QtWidgets.QLabel(val)
-                # находим строку в form_layout и заменим виджет
-                # удобнее: просто положить в layout новый label взамен виджета
-                # чтобы упростить код — мы найдём родительский form и заменим
-                parent_layout = widget.parentWidget().layout()
-                # ищем и заменяем: (индексы в QFormLayout не тривиальны),
-                # но проще — удалим widget и добавим label в его место:
-                widget.hide()
-                widget.setParent(None)
-                # Добавим label на место (в QFormLayout не гарантируется порядок, но визуально корректно)
-                parent_layout.addRow(QtWidgets.QLabel(name + " (сохранено)"), label)
-                self.param_editors[name] = label
-                self.trans_params[name] = val
-                saved_pairs.append((name, val))
+            result = compute_for_variant(int(self.spin_variant.value()))
+            img1 = result.get('img1')
+            if img1:
+                p = Path(img1)
+                if p.exists():
+                    pix = QtGui.QPixmap(str(p))
+                    self.graph_label.setPixmap(pix.scaled(self.graph_label.size(), Qt.AspectRatioMode.KeepAspectRatio))
+                else:
+                    pix = QtGui.QPixmap(780, 340)
+                    pix.fill(QtGui.QColor("lightgray"))
+                    painter = QtGui.QPainter(pix)
+                    painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "График не найден")
+                    painter.end()
+                    self.graph_label.setPixmap(pix.scaled(self.graph_label.size(), Qt.AspectRatioMode.KeepAspectRatio))
             else:
-                # уже была сохранена
-                pass
+                pix = QtGui.QPixmap(780, 340)
+                pix.fill(QtGui.QColor("lightgray"))
+                painter = QtGui.QPainter(pix)
+                painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "График не создан")
+                painter.end()
+                self.graph_label.setPixmap(pix.scaled(self.graph_label.size(), Qt.AspectRatioMode.KeepAspectRatio))
+            self._update_computed_and_vars()
+        except Exception as e:
+            self._log(f"Ошибка построения графика: {e}")
+            pix = QtGui.QPixmap(780, 340)
+            pix.fill(QtGui.QColor("lightgray"))
+            painter = QtGui.QPainter(pix)
+            painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, f"Ошибка: {e}")
+            painter.end()
+            self.graph_label.setPixmap(pix.scaled(self.graph_label.size(), Qt.AspectRatioMode.KeepAspectRatio))
 
-        # Логируем факт сохранения
-        self._log("Данные для транзистора сохранены.")
-        # также покажем краткую сводку в диалоге
-        QtWidgets.QMessageBox.information(self, "Сохранено", "Параметры транзистора сохранены и заблокированы для редактирования.")
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not hasattr(self, "_stack_filter_installed"):
+            self.stack.currentChanged.connect(self._on_stack_changed)
+            self._stack_filter_installed = True
 
-    # ----------------- запуск -----------------
+    def _on_stack_changed(self, idx):
+        if idx == 3:
+            self.show_graph_page()
+
 def main():
     app = QtWidgets.QApplication(sys.argv)
     w = MainWindow()
